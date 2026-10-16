@@ -1,0 +1,1 @@
+#通用的function可以写在这里被其他python引用
