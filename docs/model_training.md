@@ -1,8 +1,3 @@
-from pathlib import Path
-
-content = """# Step 3 — Baseline Retrieval Models
-
-第三步正式进入 **Retrieval Baseline**。
 
 目标是先完成两个传统 Information Retrieval baseline：
 
