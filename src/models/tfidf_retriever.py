@@ -1,4 +1,5 @@
 from pathlib import Path
+import re
 
 import numpy as np
 import pandas as pd
@@ -10,6 +11,18 @@ DATA_ROOT = Path("/home/data")
 
 CWE_FILE = DATA_ROOT / "processed" / "cwe_clean.csv"
 TOP50_FILE = DATA_ROOT / "processed" / "cve_cwe_top50.csv"
+
+
+# v2_Clean_Data_Leakage: remove CWE IDs from queries ("CWE-79", "(CWE-79)", "CWE 79").
+# A CWE ID in the query gives away the answer. This is the same cleaning that
+# src/data/split_dataset.py applies to the test set, so the API and the
+# evaluation treat queries the same way.
+CWE_MENTION = re.compile(r"\(?\bCWE[-\s]?\d+\b\)?", re.IGNORECASE)
+
+
+def remove_cwe_ids(text: str) -> str:
+    """Drop CWE ID mentions and collapse the extra whitespace they leave."""
+    return " ".join(CWE_MENTION.sub(" ", text).split())
 
 
 class TfidfRetriever:
@@ -184,7 +197,8 @@ class TfidfRetriever:
                 "Query must be a string"
             )
 
-        query = query.strip()
+        # v2: strip CWE IDs before searching (see remove_cwe_ids).
+        query = remove_cwe_ids(query.strip())
 
         if not query:
             raise ValueError(
