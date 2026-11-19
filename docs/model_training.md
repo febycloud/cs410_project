@@ -4,7 +4,7 @@
 1. TF-IDF + Cosine Similarity
 2. BM25
 
-后续再使用 MiniLM 做 semantic retrieval，并与 baseline 结果进行比较。
+MiniLM semantic retrieval 使用相同的 Top-50 候选集和评估流程，与两个 baseline 直接比较。
 
 ---
 
@@ -252,13 +252,13 @@ BM25 的返回格式应该与 TF-IDF 保持一致。
 
 ## Checkpoint 3.5 — 统一 Retrieval Interface
 
-TF-IDF 和 BM25 应该尽量使用相同调用方式：
+TF-IDF、BM25 和 MiniLM 使用相同调用方式：
 
 ```python
 results = retriever.search(query, top_k=5)
 ```
 
-这样后续加入 MiniLM 时可以继续保持：
+三个模型都保持：
 
 ```python
 results = retriever.search(query, top_k=5)
@@ -293,6 +293,7 @@ ground truth = cwe_id
 ```text
 TF-IDF
 BM25
+MiniLM
 ```
 
 需要计算以下指标：
@@ -328,6 +329,12 @@ BM25 metrics：
 /home/data/results/bm25_metrics.csv
 ```
 
+MiniLM metrics：
+
+```text
+/home/data/results/minilm_metrics.csv
+```
+
 建议格式：
 
 ```text
@@ -358,6 +365,12 @@ BM25：
 
 ```text
 /home/data/results/bm25_predictions.csv
+```
+
+MiniLM：
+
+```text
+/home/data/results/minilm_predictions.csv
 ```
 
 建议字段：
@@ -456,6 +469,7 @@ src/
 ```text
 src/models/tfidf_retriever.py
 src/models/bm25_retriever.py
+src/models/minilm_retriever.py
 src/evaluation/metrics.py
 src/evaluation/evaluate_baselines.py
 ```
@@ -472,9 +486,11 @@ src/evaluation/evaluate_baselines.py
 ```text
 /home/data/results/tfidf_metrics.csv
 /home/data/results/bm25_metrics.csv
+/home/data/results/minilm_metrics.csv
 
 /home/data/results/tfidf_predictions.csv
 /home/data/results/bm25_predictions.csv
+/home/data/results/minilm_predictions.csv
 ```
 
 ---
@@ -485,7 +501,7 @@ src/evaluation/evaluate_baselines.py
 
 - TF-IDF 可以输入 vulnerability description 并返回 Top-K CWE
 - BM25 可以输入 vulnerability description 并返回 Top-K CWE
-- 两个模型使用完全相同的 test set
+- 三个模型使用完全相同的 test set
 - 支持 Top 1 / Top 3 / Top 5 retrieval
 - 成功计算 Recall@1
 - 成功计算 Recall@3
@@ -499,17 +515,8 @@ src/evaluation/evaluate_baselines.py
 
 ---
 
-## Step 3 完成后
+## 当前模型比较
 
-下一阶段进入：
-
-```text
-Step 4 — MiniLM Semantic Retrieval
-```
-
-MiniLM 将使用 semantic embeddings 对 CVE description 和 CWE search text 进行向量匹配，然后与 TF-IDF 和 BM25 baseline 进行性能比较。
-"""
-
-path = Path("/mnt/data/STEP3_BASELINE_RETRIEVAL.md")
-path.write_text(content, encoding="utf-8")
-print(path)
+MiniLM 使用 semantic embeddings 匹配 CVE description 与 CWE search text，
+并与 TF-IDF、BM25 在完全相同的 test rows、Top-50 candidates、`all`/`clean`
+subsets 和指标定义下比较。

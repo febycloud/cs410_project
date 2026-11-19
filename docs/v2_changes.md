@@ -1,5 +1,11 @@
 # v2_Clean_Data_Leakage — Change Log
 
+> Historical migration note: paths containing `v2_clean_data_leakage` below
+> describe the retired intermediate layout. The current official split is
+> `/home/data/processed/train.csv` and `/home/data/processed/test.csv`, current
+> outputs are under `/home/data/results/`, and retained v1 files belong under
+> `/home/data/flagged_data/`.
+
 v2 removes data leakage from the train/test split and from retriever queries, and adds the baseline evaluation (Checkpoints 3.6–3.8 in [model_training.md](model_training.md)). The analysis behind these changes is in [data_leakage_findings.md](data_leakage_findings.md).
 
 | | |

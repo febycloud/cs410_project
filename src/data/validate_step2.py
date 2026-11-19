@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 
 from pathlib import Path
+import os
 import sys
 import pandas as pd
 
-DATA_ROOT = Path("/home/data")
+DATA_ROOT = Path(os.getenv("DATA_ROOT", "/home/data"))
 PROCESSED = DATA_ROOT / "processed"
 RESULTS = DATA_ROOT / "results"
 

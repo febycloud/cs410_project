@@ -3,14 +3,16 @@ from pathlib import Path
 
 import pandas as pd
 
-from data_util import (
-    NVD_DIR,
-    CVE_CLEAN_FILE,
-    ensure_directories,
-    clean_text,
-    normalize_cwe_id,
-    save_csv,
-)
+try:
+    from .data_util import (
+        NVD_DIR, CVE_CLEAN_FILE, ensure_directories,
+        clean_text, normalize_cwe_id, save_csv,
+    )
+except ImportError:
+    from data_util import (
+        NVD_DIR, CVE_CLEAN_FILE, ensure_directories,
+        clean_text, normalize_cwe_id, save_csv,
+    )
 
 
 INVALID_CWE_VALUES = {

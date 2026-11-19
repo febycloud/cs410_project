@@ -1,5 +1,5 @@
 """
-Step 3 (v2_Clean_Data_Leakage): leakage-aware train / test split.
+Step 3: leakage-aware train / test split.
 
 Replaces the plain random split. Same input, same output files, and the same
 three core columns (cve_id, cve_description, cwe_id), so downstream code keeps
@@ -8,13 +8,16 @@ working. Extra columns are added for leakage-aware evaluation.
 Input (read only, same file as v1):
     /home/data/processed/cve_cwe_top50.csv        (or top25 with --top 25)
 
-Outputs go to a v2 folder, so the v1 split (/home/data/processed/train.csv,
-test.csv) is never overwritten:
-    P = /home/data/processed/v2_clean_data_leakage
-    R = /home/data/results/v2_clean_data_leakage
+Official outputs:
+    Top 50:          /home/data/processed/train.csv
+                     /home/data/processed/test.csv
+                     /home/data/results/split_summary.txt
+    With --top 25:   /home/data/processed/train_top25.csv
+                     /home/data/processed/test_top25.csv
+                     /home/data/results/split_summary_top25.txt
 
-    Top 50:          P/train.csv        P/test.csv        R/split_summary.txt
-    With --top 25:   P/train_top25.csv  P/test_top25.csv  R/split_summary_top25.txt
+The retired v1 split, if retained for historical comparison, belongs under
+/home/data/flagged_data/ and is never read or written by this script.
 
 Leakage handled here (measured on the real Top 50 data):
     1. CWE IDs written in the description (e.g. "CWE-79"), 554 rows (0.7%)
@@ -42,7 +45,7 @@ Output columns (train.csv and test.csv):
     norm_key          template key used for grouping (do not use as a feature)
 
 How to evaluate with leak_flag:
-    test = pd.read_csv("/home/data/processed/v2_clean_data_leakage/test.csv")
+    test = pd.read_csv("/home/data/processed/test.csv")
     report(test)                          # all test rows
     report(test[test["leak_flag"] == 0])  # clean rows only: the honest number
 
@@ -68,10 +71,8 @@ except ImportError:
 # Settings
 # ---------------------------------------------------------------------------
 
-# v2 outputs live in their own folders so the v1 split is never overwritten.
-VERSION = "v2_clean_data_leakage"
-OUTPUT_DIR = PROCESSED_DIR / VERSION
-RESULTS_DIR = DATA_ROOT / "results" / VERSION
+OUTPUT_DIR = PROCESSED_DIR
+RESULTS_DIR = DATA_ROOT / "results"
 
 
 def output_files(top):

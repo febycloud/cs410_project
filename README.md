@@ -1,6 +1,6 @@
 # CVE → CWE 项目
 
-输入一段漏洞描述，检索出最相关的 CWE 类别并排序。检索方法计划比较 TF-IDF、BM25、MiniLM（all-MiniLM-L6-v2）和 Hybrid。
+输入一段漏洞描述，检索出最相关的 CWE 类别并排序。当前统一比较 TF-IDF、BM25 和 MiniLM（all-MiniLM-L6-v2）；Hybrid 可作为后续扩展。
 
 ## 已完成内容
 
@@ -13,6 +13,8 @@
 - 已完成 CWE 数据清洗
 - 已完成 CVE 数据清洗
 - 已完成 Step 2：CVE-CWE 匹配、CWE 分布统计、生成 Top 25 / Top 50 数据集，验证通过
+- 已完成 leakage-controlled grouped train/test split
+- 已实现 TF-IDF、BM25、MiniLM Top-50 retrieval、统一评估和 FastAPI 接口
 
 ## 数据目录
 
@@ -32,8 +34,16 @@
 │   ├── cwe_clean.csv          # Step 1
 │   ├── cve_cwe_pairs.csv      # Step 2：完整 master dataset
 │   ├── cve_cwe_top25.csv      # Step 2
-│   └── cve_cwe_top50.csv      # Step 2
+│   ├── cve_cwe_top50.csv      # Step 2：主实验候选集合
+│   ├── train.csv              # leakage-controlled grouped split
+│   └── test.csv               # official evaluation set
+├── flagged_data/
+│   ├── v1_train.csv           # 旧的 leakage-prone split（仅历史参考）
+│   └── v1_test.csv
 ├── embeddings/
+│   └── minilm/
+│       ├── cwe_embeddings.npy
+│       └── cwe_metadata.csv
 └── results/
     ├── cwe_distribution.csv   # Step 2：每个 CWE 的 CVE 数量
     └── dataset_summary.txt    # Step 2：统计结果和验证结果
@@ -48,7 +58,11 @@
 | `src/data/process_cve.py` | Step 1：清洗 NVD CVE 数据 → `cve_clean.csv` |
 | `src/data/build_dataset.py` | Step 2：匹配 CVE 和 CWE，生成 pair / Top 25 / Top 50 数据集和分布统计，并做验证 |
 | `src/data/validate_step2.py` | Step 2：独立检查所有输出文件 |
-| `src/data/validate_result.py` | 生成 `validate_step2.py` 的原始文件 |
+| `src/data/validate_result.py` | 兼容旧命令，调用规范的 `validate_step2.py` 验证器 |
+| `src/data/split_dataset.py` | 生成官方 grouped train/test split，并标记 `leak_flag` |
+| `src/models/` | TF-IDF、BM25、MiniLM Top-50 retrievers |
+| `src/evaluation/` | 统一评估 `all` 和 `clean` subsets |
+| `src/api/main.py` | FastAPI JSON API |
 | `docs/data_cleaning.md` | Step 2 详细统计和划分前的数据清洗计划 |
 
 ## 如何运行
@@ -95,10 +109,15 @@ python src/data/validate_step2.py
 
 匹配阶段删除了 142 条（0.15%）。详细统计和注意事项见 [docs/data_cleaning.md](docs/data_cleaning.md)。
 
-## 下一步
+## Retrieval、评估与 API
 
-1. 决定主实验用 Top 25 还是 Top 50
-2. 划分前的数据清洗：去掉 CWE 编号、标记标签泄漏、模板去重（详见 [docs/data_cleaning.md](docs/data_cleaning.md)）
-3. 划分训练集和测试集
-4. 实现 TF-IDF、BM25、MiniLM 和 Hybrid 检索
-5. 用 Hit@1 / 3 / 5 和 MRR 评估
+主实验固定使用 Top 50。以下命令均从项目根目录运行：
+
+```bash
+python -m src.data.split_dataset
+python -m src.evaluation.evaluate_baselines
+uvicorn src.api.main:app
+```
+
+评估计算 Recall@1/3/5、MRR 和 nDCG@5。模型比较以
+`test[test["leak_flag"] == 0]` 的 `clean` subset 为准，同时保存 `all` 结果供参考。

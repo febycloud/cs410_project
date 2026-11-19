@@ -1,5 +1,5 @@
 """
-Evaluate the TF-IDF and BM25 baselines (Checkpoints 3.6 - 3.8), v2_Clean_Data_Leakage.
+Evaluate the TF-IDF, BM25, and MiniLM retrievers.
 
 For every CVE in the test set:
     query        = cve_description
@@ -7,27 +7,24 @@ For every CVE in the test set:
 Each retriever ranks all candidate CWEs; the rank of the correct CWE gives
 Recall@1/3/5, MRR and nDCG@5 (see metrics.py).
 
-Leakage-aware reporting (v2):
-    The v2 test set has a leak_flag column (see docs/data_leakage_findings.md).
-    Metrics are reported for three subsets:
+Leakage-aware reporting:
+    The official test set has a leak_flag column.
+    Metrics are reported for two subsets:
         all     every test row
         clean   leak_flag == 0   <- the honest number to compare models on
-        leak    leak_flag == 1   (description contains its own official CWE name)
 
-Test sets:
-    --split v2 (default)  /home/data/processed/v2_clean_data_leakage/test.csv
-                          results -> /home/data/results/v2_clean_data_leakage/
-    --split v1            /home/data/processed/test.csv (old random split, no leak_flag)
-                          results -> /home/data/results/
+Official test set:
+    /home/data/processed/test.csv
+Results:
+    /home/data/results/
 
 Outputs (in the results folder above):
-    tfidf_metrics.csv, bm25_metrics.csv          one row per subset
-    tfidf_predictions.csv, bm25_predictions.csv  top-5 results for every CVE
-    metrics_summary.csv                          both models together
+    <model>_metrics.csv       one row per subset
+    <model>_predictions.csv   top-5 results for every CVE
+    metrics_summary.csv       all requested models together
 
 Usage (from the project root, with .venv activated):
     python -m src.evaluation.evaluate_baselines
-    python -m src.evaluation.evaluate_baselines --split v1
     python -m src.evaluation.evaluate_baselines --models tfidf
 """
 import argparse
@@ -48,29 +45,24 @@ PROCESSED = DATA_ROOT / "processed"
 CWE_FILE = PROCESSED / "cwe_clean.csv"
 CANDIDATE_FILE = PROCESSED / "cve_cwe_top50.csv"
 
-SPLITS = {
-    "v1": {
-        "test": PROCESSED / "test.csv",
-        "results": DATA_ROOT / "results",
-    },
-    "v2": {
-        "test": PROCESSED / "v2_clean_data_leakage" / "test.csv",
-        "results": DATA_ROOT / "results" / "v2_clean_data_leakage",
-    },
-}
+TEST_FILE = PROCESSED / "test.csv"
+RESULTS_DIR = DATA_ROOT / "results"
 
 METRIC_COLUMNS = ["recall@1", "recall@3", "recall@5", "mrr", "ndcg@5"]
 TOP_N_SAVED = 5  # predictions file keeps the top 5 results per query
 
 
 def load_retriever(name):
-    """Import lazily, so evaluating only TF-IDF does not need rank_bm25."""
+    """Import lazily so optional model dependencies are needed only when used."""
     if name == "tfidf":
         from src.models.tfidf_retriever import TfidfRetriever
         return "TF-IDF", TfidfRetriever(cwe_file=CWE_FILE, candidate_file=CANDIDATE_FILE)
     if name == "bm25":
         from src.models.bm25_retriever import BM25Retriever
         return "BM25", BM25Retriever(cwe_file=CWE_FILE, candidate_file=CANDIDATE_FILE)
+    if name == "minilm":
+        from src.models.minilm_retriever import MiniLMRetriever
+        return "MiniLM", MiniLMRetriever(cwe_file=CWE_FILE, candidate_file=CANDIDATE_FILE)
     raise ValueError(f"Unknown model: {name}")
 
 
@@ -108,11 +100,18 @@ def rank_all(retriever, test):
 
 
 def metrics_by_subset(model_name, predictions):
-    """Metrics for all rows, and for clean / leak rows when leak_flag exists."""
-    subsets = [("all", predictions)]
-    if "leak_flag" in predictions.columns:
-        flag = predictions["leak_flag"].astype(int)
-        subsets += [("clean", predictions[flag == 0]), ("leak", predictions[flag == 1])]
+    """Metrics for all rows and exactly the leak_flag == 0 rows."""
+    if "leak_flag" not in predictions.columns:
+        raise ValueError("Official test data must contain a leak_flag column")
+
+    flag = pd.to_numeric(predictions["leak_flag"], errors="raise")
+    clean = predictions[flag == 0]
+    if clean.empty:
+        raise ValueError("Official test data contains no clean (leak_flag == 0) rows")
+    subsets = [
+        ("all", predictions),
+        ("clean", clean),
+    ]
 
     out = []
     for subset, part in subsets:
@@ -122,17 +121,39 @@ def metrics_by_subset(model_name, predictions):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Evaluate TF-IDF and BM25 baselines")
-    parser.add_argument("--split", choices=["v1", "v2"], default="v2")
-    parser.add_argument("--models", nargs="+", choices=["tfidf", "bm25"], default=["tfidf", "bm25"])
+    parser = argparse.ArgumentParser(description="Evaluate CVE-to-CWE retrievers")
+    parser.add_argument(
+        "--models",
+        nargs="+",
+        choices=["tfidf", "bm25", "minilm"],
+        default=["tfidf", "bm25", "minilm"],
+    )
     args = parser.parse_args()
 
-    test_file = SPLITS[args.split]["test"]
-    results_dir = SPLITS[args.split]["results"]
-    results_dir.mkdir(parents=True, exist_ok=True)
+    RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 
-    print(f"Test set: {test_file}")
-    test = pd.read_csv(test_file, dtype=str, keep_default_na=False)
+    print(f"Test set: {TEST_FILE}")
+    test = pd.read_csv(TEST_FILE, dtype=str, keep_default_na=False)
+    required = {"cve_id", "cve_description", "cwe_id", "leak_flag"}
+    missing = sorted(required - set(test.columns))
+    if missing:
+        raise ValueError(f"Official test data is missing columns: {missing}")
+
+    candidate_df = pd.read_csv(CANDIDATE_FILE, dtype=str, keep_default_na=False)
+    if "cwe_id" not in candidate_df.columns:
+        raise ValueError("Candidate data is missing the cwe_id column")
+    candidate_ids = set(candidate_df["cwe_id"].str.strip()) - {""}
+    if len(candidate_ids) != 50:
+        raise ValueError(
+            f"Expected exactly 50 candidate CWE IDs, found {len(candidate_ids)}"
+        )
+    test_ids = set(test["cwe_id"].str.strip())
+    outside_candidates = sorted(test_ids - candidate_ids)
+    if outside_candidates:
+        raise ValueError(
+            "Official test data contains labels outside the Top-50 candidate set: "
+            f"{outside_candidates}"
+        )
     print(f"Test queries: {len(test):,}")
     if "leak_flag" in test.columns:
         print(f"Clean queries (leak_flag = 0): {int((test['leak_flag'] == '0').sum()):,}")
@@ -149,19 +170,19 @@ def main():
         metrics = metrics_by_subset(model_name, predictions)
         all_metrics.append(metrics)
 
-        predictions.to_csv(results_dir / f"{key}_predictions.csv", index=False)
-        metrics.to_csv(results_dir / f"{key}_metrics.csv", index=False)
+        predictions.to_csv(RESULTS_DIR / f"{key}_predictions.csv", index=False)
+        metrics.to_csv(RESULTS_DIR / f"{key}_metrics.csv", index=False)
         print()
 
     summary = pd.concat(all_metrics, ignore_index=True)
-    summary.to_csv(results_dir / "metrics_summary.csv", index=False)
+    summary.to_csv(RESULTS_DIR / "metrics_summary.csv", index=False)
 
     print("=" * 78)
-    print(f"Results ({args.split} test set)")
+    print("Results (official test set)")
     print("=" * 78)
     print(summary.to_string(index=False, float_format=lambda x: f"{x:.4f}"))
     print()
-    print(f"Saved to: {results_dir}")
+    print(f"Saved to: {RESULTS_DIR}")
 
 
 if __name__ == "__main__":

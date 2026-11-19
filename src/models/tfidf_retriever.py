@@ -1,28 +1,21 @@
 from pathlib import Path
-import re
+import os
 
 import numpy as np
 import pandas as pd
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 
+try:
+    from .query_preprocessing import remove_cwe_ids
+except ImportError:
+    from query_preprocessing import remove_cwe_ids
 
-DATA_ROOT = Path("/home/data")
+
+DATA_ROOT = Path(os.getenv("DATA_ROOT", "/home/data"))
 
 CWE_FILE = DATA_ROOT / "processed" / "cwe_clean.csv"
 TOP50_FILE = DATA_ROOT / "processed" / "cve_cwe_top50.csv"
-
-
-# v2_Clean_Data_Leakage: remove CWE IDs from queries ("CWE-79", "(CWE-79)", "CWE 79").
-# A CWE ID in the query gives away the answer. This is the same cleaning that
-# src/data/split_dataset.py applies to the test set, so the API and the
-# evaluation treat queries the same way.
-CWE_MENTION = re.compile(r"\(?\bCWE[-\s]?\d+\b\)?", re.IGNORECASE)
-
-
-def remove_cwe_ids(text: str) -> str:
-    """Drop CWE ID mentions and collapse the extra whitespace they leave."""
-    return " ".join(CWE_MENTION.sub(" ", text).split())
 
 
 class TfidfRetriever:
@@ -96,8 +89,14 @@ class TfidfRetriever:
             candidate_df["cwe_id"]
             .dropna()
             .astype(str)
+            .str.strip()
             .unique()
         )
+
+        if not allowed_cwe_ids:
+            raise ValueError("Candidate dataset contains no CWE IDs")
+
+        self.cwe_df["cwe_id"] = self.cwe_df["cwe_id"].astype(str).str.strip()
 
         self.cwe_df = self.cwe_df[
             self.cwe_df["cwe_id"].astype(str).isin(
@@ -138,8 +137,16 @@ class TfidfRetriever:
         self.cwe_df = (
             self.cwe_df
             .drop_duplicates(subset=["cwe_id"])
+            .sort_values("cwe_id")
             .reset_index(drop=True)
         )
+
+        missing_candidates = allowed_cwe_ids - set(self.cwe_df["cwe_id"])
+        if missing_candidates:
+            raise ValueError(
+                "CWE definitions are missing valid search documents for candidates: "
+                f"{sorted(missing_candidates)}"
+            )
 
         if self.cwe_df.empty:
             raise ValueError(
@@ -197,7 +204,7 @@ class TfidfRetriever:
                 "Query must be a string"
             )
 
-        # v2: strip CWE IDs before searching (see remove_cwe_ids).
+        # Strip CWE IDs before searching (see remove_cwe_ids).
         query = remove_cwe_ids(query.strip())
 
         if not query:

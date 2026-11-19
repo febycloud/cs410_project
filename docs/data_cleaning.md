@@ -53,7 +53,7 @@
 
 ## 划分前的数据清洗（v2 已完成）
 
-主实验使用 Top 50。下面三项都在 `src/data/split_dataset.py` 里完成，输出到 `/home/data/processed/v2_clean_data_leakage/train.csv` 和 `test.csv`，不会覆盖 v1 的划分。
+主实验使用 Top 50。下面三项都在 `src/data/split_dataset.py` 里完成，官方输出为 `/home/data/processed/train.csv` 和 `/home/data/processed/test.csv`。旧的 v1 划分如需保留，应放在 `/home/data/flagged_data/`。
 
 | 问题 | 条数（Top 50） | v2 的处理 |
 | --- | --- | --- |

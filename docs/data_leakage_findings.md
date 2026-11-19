@@ -78,9 +78,9 @@ v2 reads the same input as v1 but writes to its own folders, so the v1 split is 
 | | Path |
 | --- | --- |
 | Input | `/home/data/processed/cve_cwe_top50.csv` (`--top 25` uses `cve_cwe_top25.csv`) |
-| Train / test | `/home/data/processed/v2_clean_data_leakage/train.csv`, `test.csv` |
-| Top 25 | `/home/data/processed/v2_clean_data_leakage/train_top25.csv`, `test_top25.csv` |
-| Summary | `/home/data/results/v2_clean_data_leakage/split_summary.txt` |
+| Train / test | `/home/data/processed/train.csv`, `/home/data/processed/test.csv` |
+| Top 25 | `/home/data/processed/train_top25.csv`, `/home/data/processed/test_top25.csv` |
+| Summary | `/home/data/results/split_summary.txt` |
 
 Output columns: `cve_id`, `cve_description` (use as the query), `cwe_id`, `year`, `leak_flag`, `norm_key` (used for grouping only, not as a feature).
 
@@ -105,7 +105,7 @@ Report every metric on all test rows **and** on clean rows only:
 ```python
 import pandas as pd
 
-test = pd.read_csv("/home/data/processed/v2_clean_data_leakage/test.csv")
+test = pd.read_csv("/home/data/processed/test.csv")
 evaluate(test)                          # all test rows
 evaluate(test[test["leak_flag"] == 0])  # clean rows only: the honest number
 ```

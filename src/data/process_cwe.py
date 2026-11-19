@@ -1,13 +1,15 @@
 import pandas as pd
 
-from data_util import (
-    CWE_RAW_FILE,
-    CWE_CLEAN_FILE,
-    ensure_directories,
-    normalize_cwe_id,
-    clean_text,
-    save_csv,
-)
+try:
+    from .data_util import (
+        CWE_RAW_FILE, CWE_CLEAN_FILE, ensure_directories,
+        normalize_cwe_id, clean_text, save_csv,
+    )
+except ImportError:
+    from data_util import (
+        CWE_RAW_FILE, CWE_CLEAN_FILE, ensure_directories,
+        normalize_cwe_id, clean_text, save_csv,
+    )
 
 
 def main():

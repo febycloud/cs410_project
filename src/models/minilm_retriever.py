@@ -1,17 +1,22 @@
 from pathlib import Path
-import re
+import os
 
 import numpy as np
 import pandas as pd
 import torch
 from sentence_transformers import SentenceTransformer
 
+try:
+    from .query_preprocessing import remove_cwe_ids
+except ImportError:
+    from query_preprocessing import remove_cwe_ids
+
 
 # ============================================================
 # Paths
 # ============================================================
 
-DATA_ROOT = Path("/home/data")
+DATA_ROOT = Path(os.getenv("DATA_ROOT", "/home/data"))
 
 PROCESSED_DIR = DATA_ROOT / "processed"
 EMBEDDING_DIR = DATA_ROOT / "embeddings" / "minilm"
@@ -22,37 +27,11 @@ TOP50_FILE = PROCESSED_DIR / "cve_cwe_top50.csv"
 CWE_EMBEDDING_FILE = EMBEDDING_DIR / "cwe_embeddings.npy"
 CWE_METADATA_FILE = EMBEDDING_DIR / "cwe_metadata.csv"
 
-
 # ============================================================
 # Model
 # ============================================================
 
 DEFAULT_MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
-
-
-def remove_cwe_ids(text: str) -> str:
-    """
-    Remove explicit CWE IDs from user queries.
-
-    Example:
-        "This vulnerability is CWE-79 XSS"
-        ->
-        "This vulnerability is XSS"
-
-    This reduces direct label leakage.
-    """
-
-    if not isinstance(text, str):
-        return ""
-
-    text = re.sub(
-        r"\bCWE-\d+\b",
-        "",
-        text,
-        flags=re.IGNORECASE,
-    )
-
-    return " ".join(text.split())
 
 
 class MiniLMRetriever:
@@ -62,6 +41,7 @@ class MiniLMRetriever:
         candidate_file=TOP50_FILE,
         model_name=DEFAULT_MODEL_NAME,
         use_saved_embeddings=True,
+        embedding_dir=EMBEDDING_DIR,
     ):
         """
         Semantic CWE retriever using MiniLM embeddings.
@@ -80,6 +60,9 @@ class MiniLMRetriever:
 
         use_saved_embeddings:
             Load previously generated CWE embeddings if available.
+
+        embedding_dir:
+            Directory containing cwe_embeddings.npy and cwe_metadata.csv.
         """
 
         self.cwe_file = Path(cwe_file)
@@ -87,6 +70,9 @@ class MiniLMRetriever:
 
         self.model_name = model_name
         self.use_saved_embeddings = use_saved_embeddings
+        self.embedding_dir = Path(embedding_dir)
+        self.embedding_file = self.embedding_dir / "cwe_embeddings.npy"
+        self.metadata_file = self.embedding_dir / "cwe_metadata.csv"
 
         self.device = self._get_device()
 
@@ -161,6 +147,9 @@ class MiniLMRetriever:
             .unique()
         )
 
+        if not allowed_cwe_ids:
+            raise ValueError("Candidate dataset contains no CWE IDs")
+
         # Restrict CWE corpus to Top 50
         cwe_df = cwe_df[
             cwe_df["cwe_id"]
@@ -210,6 +199,13 @@ class MiniLMRetriever:
             .reset_index(drop=True)
         )
 
+        missing_candidates = allowed_cwe_ids - set(cwe_df["cwe_id"])
+        if missing_candidates:
+            raise ValueError(
+                "CWE definitions are missing valid search documents for candidates: "
+                f"{sorted(missing_candidates)}"
+            )
+
         if cwe_df.empty:
             raise ValueError(
                 "No valid CWE candidates were loaded"
@@ -240,51 +236,46 @@ class MiniLMRetriever:
     # ========================================================
 
     def _prepare_embeddings(self):
-        EMBEDDING_DIR.mkdir(
+        self.embedding_dir.mkdir(
             parents=True,
             exist_ok=True,
         )
 
         if (
             self.use_saved_embeddings
-            and CWE_EMBEDDING_FILE.exists()
-            and CWE_METADATA_FILE.exists()
+            and self.embedding_file.exists()
+            and self.metadata_file.exists()
         ):
             metadata = pd.read_csv(
-                CWE_METADATA_FILE
+                self.metadata_file,
+                dtype=str,
+                keep_default_na=False,
             )
 
-            if "cwe_id" in metadata.columns:
-                saved_ids = (
-                    metadata["cwe_id"]
-                    .astype(str)
-                    .tolist()
+            expected_metadata = self._current_metadata()
+            if metadata.equals(expected_metadata):
+                try:
+                    embeddings = np.load(self.embedding_file)
+                except (OSError, ValueError):
+                    embeddings = None
+                expected_dim = self.model.get_sentence_embedding_dimension()
+                valid_shape = (
+                    embeddings is not None
+                    and embeddings.ndim == 2
+                    and embeddings.shape == (len(self.cwe_df), expected_dim)
+                )
+                valid_values = valid_shape and np.isfinite(embeddings).all()
+                valid_norms = valid_shape and np.allclose(
+                    np.linalg.norm(embeddings, axis=1),
+                    1.0,
+                    atol=1e-3,
                 )
 
-                current_ids = (
-                    self.cwe_df["cwe_id"]
-                    .astype(str)
-                    .tolist()
-                )
-
-                if saved_ids == current_ids:
-                    embeddings = np.load(
-                        CWE_EMBEDDING_FILE
-                    )
-
-                    if len(embeddings) == len(self.cwe_df):
-                        self.cwe_embeddings = embeddings
-
-                        print(
-                            "Loaded saved CWE embeddings"
-                        )
-
-                        print(
-                            f"Embedding shape: "
-                            f"{self.cwe_embeddings.shape}"
-                        )
-
-                        return
+                if valid_shape and valid_values and valid_norms:
+                    self.cwe_embeddings = embeddings
+                    print("Loaded saved CWE embeddings")
+                    print(f"Embedding shape: {self.cwe_embeddings.shape}")
+                    return
 
             print(
                 "Saved embeddings do not match "
@@ -296,6 +287,12 @@ class MiniLMRetriever:
             )
 
         self._generate_embeddings()
+
+    def _current_metadata(self):
+        """Metadata that uniquely identifies the model inputs and their order."""
+        metadata = self.cwe_df[["cwe_id", "name", "search_text"]].copy()
+        metadata["model_name"] = self.model_name
+        return metadata.reset_index(drop=True)
 
     def _generate_embeddings(self):
         print(
@@ -316,29 +313,24 @@ class MiniLMRetriever:
         )
 
         np.save(
-            CWE_EMBEDDING_FILE,
+            self.embedding_file,
             self.cwe_embeddings,
         )
 
-        self.cwe_df[
-            [
-                "cwe_id",
-                "name",
-            ]
-        ].to_csv(
-            CWE_METADATA_FILE,
+        self._current_metadata().to_csv(
+            self.metadata_file,
             index=False,
             encoding="utf-8",
         )
 
         print(
             f"Saved embeddings to: "
-            f"{CWE_EMBEDDING_FILE}"
+            f"{self.embedding_file}"
         )
 
         print(
             f"Saved metadata to: "
-            f"{CWE_METADATA_FILE}"
+            f"{self.metadata_file}"
         )
 
         print(

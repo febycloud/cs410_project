@@ -13,25 +13,43 @@ the rank at which the correct CWE was returned:
 """
 import math
 
-import numpy as np
+
+def _validated_ranks(ranks):
+    values = [float(rank) for rank in ranks]
+    if any(math.isnan(rank) or rank < 1 for rank in values):
+        raise ValueError("Ranks must be positive numbers or infinity")
+    return values
+
+
+def _validate_k(k):
+    if not isinstance(k, int) or isinstance(k, bool) or k < 1:
+        raise ValueError("k must be a positive integer")
 
 
 def recall_at_k(ranks, k):
-    ranks = np.asarray(ranks, dtype=float)
-    return float(np.mean(ranks <= k)) if len(ranks) else 0.0
+    _validate_k(k)
+    ranks = _validated_ranks(ranks)
+    return sum(rank <= k for rank in ranks) / len(ranks) if ranks else 0.0
 
 
 def mrr(ranks):
-    ranks = np.asarray(ranks, dtype=float)
-    return float(np.mean(1.0 / ranks)) if len(ranks) else 0.0  # 1 / inf = 0
+    ranks = _validated_ranks(ranks)
+    if not ranks:
+        return 0.0
+    reciprocals = [
+        0.0 if math.isinf(rank) else 1.0 / rank
+        for rank in ranks
+    ]
+    return sum(reciprocals) / len(reciprocals)
 
 
 def ndcg_at_k(ranks, k):
-    ranks = np.asarray(ranks, dtype=float)
-    if not len(ranks):
+    _validate_k(k)
+    ranks = _validated_ranks(ranks)
+    if not ranks:
         return 0.0
-    gains = [1.0 / math.log2(r + 1) if r <= k else 0.0 for r in ranks]
-    return float(np.mean(gains))
+    gains = [1.0 / math.log2(rank + 1) if rank <= k else 0.0 for rank in ranks]
+    return sum(gains) / len(gains)
 
 
 def compute_metrics(ranks):
