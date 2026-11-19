@@ -1,188 +1,632 @@
-"""
-Evaluate the TF-IDF, BM25, and MiniLM retrievers.
-
-For every CVE in the test set:
-    query        = cve_description
-    ground truth = cwe_id
-Each retriever ranks all candidate CWEs; the rank of the correct CWE gives
-Recall@1/3/5, MRR and nDCG@5 (see metrics.py).
-
-Leakage-aware reporting:
-    The official test set has a leak_flag column.
-    Metrics are reported for two subsets:
-        all     every test row
-        clean   leak_flag == 0   <- the honest number to compare models on
-
-Official test set:
-    /home/data/processed/test.csv
-Results:
-    /home/data/results/
-
-Outputs (in the results folder above):
-    <model>_metrics.csv       one row per subset
-    <model>_predictions.csv   top-5 results for every CVE
-    metrics_summary.csv       all requested models together
-
-Usage (from the project root, with .venv activated):
-    python -m src.evaluation.evaluate_baselines
-    python -m src.evaluation.evaluate_baselines --models tfidf
-"""
-import argparse
+from pathlib import Path
 import os
 import time
-from pathlib import Path
 
-import numpy as np
 import pandas as pd
 
-from src.evaluation.metrics import compute_metrics
+from src.models.tfidf_retriever import TfidfRetriever
+from src.models.bm25_retriever import BM25Retriever
+from src.models.minilm_retriever import MiniLMRetriever
+
+from src.evaluation.metrics import (
+    recall_at_k,
+    mrr,
+    ndcg_at_k,
+)
 
 
-DATA_ROOT = Path(os.getenv("DATA_ROOT", "/home/data"))
-PROCESSED = DATA_ROOT / "processed"
+# ============================================================
+# Configuration
+# ============================================================
 
-# CWE documents and candidate list are the same for v1 and v2.
-CWE_FILE = PROCESSED / "cwe_clean.csv"
-CANDIDATE_FILE = PROCESSED / "cve_cwe_top50.csv"
+DATA_ROOT = Path(
+    os.getenv("DATA_ROOT", "/home/data")
+)
 
-TEST_FILE = PROCESSED / "test.csv"
-RESULTS_DIR = DATA_ROOT / "results"
+TEST_FILE = (
+    DATA_ROOT
+    / "processed"
+    / "test.csv"
+)
 
-METRIC_COLUMNS = ["recall@1", "recall@3", "recall@5", "mrr", "ndcg@5"]
-TOP_N_SAVED = 5  # predictions file keeps the top 5 results per query
+RESULTS_DIR = (
+    DATA_ROOT
+    / "results"
+)
 
+EXPECTED_CANDIDATE_COUNT = 50
 
-def load_retriever(name):
-    """Import lazily so optional model dependencies are needed only when used."""
-    if name == "tfidf":
-        from src.models.tfidf_retriever import TfidfRetriever
-        return "TF-IDF", TfidfRetriever(cwe_file=CWE_FILE, candidate_file=CANDIDATE_FILE)
-    if name == "bm25":
-        from src.models.bm25_retriever import BM25Retriever
-        return "BM25", BM25Retriever(cwe_file=CWE_FILE, candidate_file=CANDIDATE_FILE)
-    if name == "minilm":
-        from src.models.minilm_retriever import MiniLMRetriever
-        return "MiniLM", MiniLMRetriever(cwe_file=CWE_FILE, candidate_file=CANDIDATE_FILE)
-    raise ValueError(f"Unknown model: {name}")
+TOP_K = 5
 
 
-def rank_all(retriever, test):
-    """
-    Run every test query and return one prediction row per CVE.
-    All candidates are retrieved so the rank of the correct CWE is always known.
-    """
-    n_candidates = retriever.get_candidate_count()
+# ============================================================
+# Load and validate test dataset
+# ============================================================
+
+def load_test_data():
+    if not TEST_FILE.exists():
+        raise FileNotFoundError(
+            f"Test file not found: {TEST_FILE}"
+        )
+
+    test_df = pd.read_csv(TEST_FILE)
+
+    required_columns = [
+        "cve_id",
+        "cve_description",
+        "cwe_id",
+        "leak_flag",
+    ]
+
+    missing_columns = [
+        column
+        for column in required_columns
+        if column not in test_df.columns
+    ]
+
+    if missing_columns:
+        raise ValueError(
+            "Test dataset is missing required columns: "
+            f"{missing_columns}"
+        )
+
+    test_df = test_df.dropna(
+        subset=[
+            "cve_id",
+            "cve_description",
+            "cwe_id",
+            "leak_flag",
+        ]
+    ).reset_index(drop=True)
+
+    test_df["cve_id"] = (
+        test_df["cve_id"]
+        .astype(str)
+        .str.strip()
+    )
+
+    test_df["cve_description"] = (
+        test_df["cve_description"]
+        .astype(str)
+        .str.strip()
+    )
+
+    test_df["cwe_id"] = (
+        test_df["cwe_id"]
+        .astype(str)
+        .str.strip()
+    )
+
+    test_df["leak_flag"] = (
+        pd.to_numeric(
+            test_df["leak_flag"],
+            errors="raise",
+        )
+        .astype(int)
+    )
+
+    if (
+        test_df["cve_description"]
+        .str.len()
+        .eq(0)
+        .any()
+    ):
+        raise ValueError(
+            "Test dataset contains empty CVE descriptions"
+        )
+
+    unique_cwe_count = (
+        test_df["cwe_id"]
+        .nunique()
+    )
+
+    if unique_cwe_count != EXPECTED_CANDIDATE_COUNT:
+        raise ValueError(
+            f"Expected exactly "
+            f"{EXPECTED_CANDIDATE_COUNT} CWE classes "
+            f"in test.csv, found {unique_cwe_count}"
+        )
+
+    return test_df
+
+
+# ============================================================
+# Convert retrieval result into prediction row
+# ============================================================
+
+def build_prediction_row(
+    cve_id,
+    query,
+    ground_truth_cwe,
+    leak_flag,
+    results,
+):
+    predicted_ids = [
+        result["cwe_id"]
+        for result in results
+    ]
+
+    ground_truth_rank = None
+
+    for rank, predicted_cwe in enumerate(
+        predicted_ids,
+        start=1,
+    ):
+        if predicted_cwe == ground_truth_cwe:
+            ground_truth_rank = rank
+            break
+
+    output = {
+        "cve_id": cve_id,
+        "query": query,
+        "ground_truth_cwe": ground_truth_cwe,
+        "leak_flag": leak_flag,
+        "ground_truth_rank": ground_truth_rank,
+    }
+
+    for index in range(TOP_K):
+        rank = index + 1
+
+        if index < len(results):
+            result = results[index]
+
+            output[
+                f"rank_{rank}_cwe"
+            ] = result["cwe_id"]
+
+            output[
+                f"rank_{rank}_score"
+            ] = result["score"]
+
+        else:
+            output[
+                f"rank_{rank}_cwe"
+            ] = None
+
+            output[
+                f"rank_{rank}_score"
+            ] = None
+
+    return output
+
+
+# ============================================================
+# TF-IDF / BM25 evaluation
+# ============================================================
+
+def rank_model_one_by_one(
+    model_name,
+    retriever,
+    test_df,
+):
+    start_time = time.time()
+
     rows = []
 
-    for row in test.itertuples(index=False):
-        try:
-            results = retriever.search(query=row.cve_description, top_k=n_candidates)
-        except ValueError:
-            results = []  # e.g. the query has no usable tokens: counts as not found
+    for row in test_df.itertuples(
+        index=False
+    ):
+        results = retriever.search(
+            row.cve_description,
+            top_k=TOP_K,
+        )
 
-        ranked_ids = [r["cwe_id"] for r in results]
-        true_rank = ranked_ids.index(row.cwe_id) + 1 if row.cwe_id in ranked_ids else np.inf
+        output = build_prediction_row(
+            cve_id=row.cve_id,
+            query=row.cve_description,
+            ground_truth_cwe=row.cwe_id,
+            leak_flag=row.leak_flag,
+            results=results,
+        )
 
-        pred = {
-            "cve_id": row.cve_id,
-            "query": row.cve_description,
-            "ground_truth_cwe": row.cwe_id,
-        }
-        for i in range(TOP_N_SAVED):
-            pred[f"rank_{i + 1}_cwe"] = ranked_ids[i] if i < len(ranked_ids) else ""
-        pred["rank_1_score"] = results[0]["score"] if results else np.nan
-        pred["ground_truth_rank"] = true_rank
-        if hasattr(row, "leak_flag"):
-            pred["leak_flag"] = row.leak_flag
-        rows.append(pred)
+        rows.append(output)
+
+    elapsed = (
+        time.time()
+        - start_time
+    )
+
+    print(
+        f"{model_name}: ranked "
+        f"{len(test_df):,} queries "
+        f"in {elapsed:.1f}s"
+    )
 
     return pd.DataFrame(rows)
 
 
-def metrics_by_subset(model_name, predictions):
-    """Metrics for all rows and exactly the leak_flag == 0 rows."""
-    if "leak_flag" not in predictions.columns:
-        raise ValueError("Official test data must contain a leak_flag column")
+# ============================================================
+# MiniLM batch evaluation
+# ============================================================
 
-    flag = pd.to_numeric(predictions["leak_flag"], errors="raise")
-    clean = predictions[flag == 0]
-    if clean.empty:
-        raise ValueError("Official test data contains no clean (leak_flag == 0) rows")
-    subsets = [
-        ("all", predictions),
-        ("clean", clean),
-    ]
+def rank_minilm_batch(
+    retriever,
+    test_df,
+):
+    start_time = time.time()
 
-    out = []
-    for subset, part in subsets:
-        m = compute_metrics(part["ground_truth_rank"].to_numpy())
-        out.append({"model": model_name, "subset": subset, "n": len(part), **m})
-    return pd.DataFrame(out)[["model", "subset", "n"] + METRIC_COLUMNS]
+    queries = (
+        test_df["cve_description"]
+        .tolist()
+    )
 
+    all_results = retriever.search_batch(
+        queries,
+        top_k=TOP_K,
+        batch_size=64,
+        show_progress_bar=True,
+    )
+
+    if len(all_results) != len(test_df):
+        raise ValueError(
+            "MiniLM batch result count does not match "
+            "test query count"
+        )
+
+    rows = []
+
+    for row, results in zip(
+        test_df.itertuples(
+            index=False
+        ),
+        all_results,
+    ):
+        output = build_prediction_row(
+            cve_id=row.cve_id,
+            query=row.cve_description,
+            ground_truth_cwe=row.cwe_id,
+            leak_flag=row.leak_flag,
+            results=results,
+        )
+
+        rows.append(output)
+
+    elapsed = (
+        time.time()
+        - start_time
+    )
+
+    print(
+        f"MiniLM: ranked "
+        f"{len(test_df):,} queries "
+        f"in {elapsed:.1f}s"
+    )
+
+    return pd.DataFrame(rows)
+
+
+# ============================================================
+# Metrics
+# ============================================================
+
+def extract_ranks(predictions_df):
+    ranks = []
+
+    for value in predictions_df[
+        "ground_truth_rank"
+    ]:
+        if pd.isna(value):
+            ranks.append(None)
+        else:
+            ranks.append(int(value))
+
+    return ranks
+
+
+def compute_subset_metrics(
+    model_name,
+    subset_name,
+    predictions_df,
+):
+    ranks = extract_ranks(
+        predictions_df
+    )
+
+    return {
+        "model": model_name,
+        "subset": subset_name,
+        "queries": len(predictions_df),
+        "recall@1": recall_at_k(
+            ranks,
+            1,
+        ),
+        "recall@3": recall_at_k(
+            ranks,
+            3,
+        ),
+        "recall@5": recall_at_k(
+            ranks,
+            5,
+        ),
+        "mrr": mrr(ranks),
+        "ndcg@5": ndcg_at_k(
+            ranks,
+            5,
+        ),
+    }
+
+
+def evaluate_subsets(
+    model_name,
+    predictions_df,
+):
+    all_metrics = (
+        compute_subset_metrics(
+            model_name=model_name,
+            subset_name="all",
+            predictions_df=predictions_df,
+        )
+    )
+
+    clean_df = predictions_df[
+        predictions_df["leak_flag"] == 0
+    ].copy()
+
+    clean_metrics = (
+        compute_subset_metrics(
+            model_name=model_name,
+            subset_name="clean",
+            predictions_df=clean_df,
+        )
+    )
+
+    return pd.DataFrame(
+        [
+            all_metrics,
+            clean_metrics,
+        ]
+    )
+
+
+# ============================================================
+# Save results
+# ============================================================
+
+def save_results(
+    model_key,
+    predictions_df,
+    metrics_df,
+):
+    RESULTS_DIR.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    predictions_file = (
+        RESULTS_DIR
+        / f"{model_key}_predictions.csv"
+    )
+
+    metrics_file = (
+        RESULTS_DIR
+        / f"{model_key}_metrics.csv"
+    )
+
+    predictions_df.to_csv(
+        predictions_file,
+        index=False,
+        encoding="utf-8",
+    )
+
+    metrics_df.to_csv(
+        metrics_file,
+        index=False,
+        encoding="utf-8",
+    )
+
+    print(
+        f"Saved predictions: "
+        f"{predictions_file}"
+    )
+
+    print(
+        f"Saved metrics: "
+        f"{metrics_file}"
+    )
+
+
+# ============================================================
+# Candidate validation
+# ============================================================
+
+def validate_retriever(
+    model_name,
+    retriever,
+):
+    candidate_count = (
+        retriever.get_candidate_count()
+    )
+
+    if (
+        candidate_count
+        != EXPECTED_CANDIDATE_COUNT
+    ):
+        raise ValueError(
+            f"{model_name} expected "
+            f"{EXPECTED_CANDIDATE_COUNT} candidates, "
+            f"got {candidate_count}"
+        )
+
+    print(
+        f"{model_name} candidate count: "
+        f"{candidate_count}"
+    )
+
+
+# ============================================================
+# Main
+# ============================================================
 
 def main():
-    parser = argparse.ArgumentParser(description="Evaluate CVE-to-CWE retrievers")
-    parser.add_argument(
-        "--models",
-        nargs="+",
-        choices=["tfidf", "bm25", "minilm"],
-        default=["tfidf", "bm25", "minilm"],
+    test_df = load_test_data()
+
+    print(
+        f"Test set: {TEST_FILE}"
     )
-    args = parser.parse_args()
 
-    RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+    print(
+        f"Test queries: "
+        f"{len(test_df):,}"
+    )
 
-    print(f"Test set: {TEST_FILE}")
-    test = pd.read_csv(TEST_FILE, dtype=str, keep_default_na=False)
-    required = {"cve_id", "cve_description", "cwe_id", "leak_flag"}
-    missing = sorted(required - set(test.columns))
-    if missing:
-        raise ValueError(f"Official test data is missing columns: {missing}")
+    clean_count = int(
+        (
+            test_df["leak_flag"]
+            == 0
+        ).sum()
+    )
 
-    candidate_df = pd.read_csv(CANDIDATE_FILE, dtype=str, keep_default_na=False)
-    if "cwe_id" not in candidate_df.columns:
-        raise ValueError("Candidate data is missing the cwe_id column")
-    candidate_ids = set(candidate_df["cwe_id"].str.strip()) - {""}
-    if len(candidate_ids) != 50:
-        raise ValueError(
-            f"Expected exactly 50 candidate CWE IDs, found {len(candidate_ids)}"
-        )
-    test_ids = set(test["cwe_id"].str.strip())
-    outside_candidates = sorted(test_ids - candidate_ids)
-    if outside_candidates:
-        raise ValueError(
-            "Official test data contains labels outside the Top-50 candidate set: "
-            f"{outside_candidates}"
-        )
-    print(f"Test queries: {len(test):,}")
-    if "leak_flag" in test.columns:
-        print(f"Clean queries (leak_flag = 0): {int((test['leak_flag'] == '0').sum()):,}")
+    print(
+        "Clean queries "
+        "(leak_flag = 0): "
+        f"{clean_count:,}"
+    )
+
     print()
 
     all_metrics = []
-    for key in args.models:
-        model_name, retriever = load_retriever(key)
 
-        start = time.time()
-        predictions = rank_all(retriever, test)
-        print(f"{model_name}: ranked {len(predictions):,} queries in {time.time() - start:.0f}s")
+    # ========================================================
+    # TF-IDF
+    # ========================================================
 
-        metrics = metrics_by_subset(model_name, predictions)
-        all_metrics.append(metrics)
+    tfidf = TfidfRetriever()
 
-        predictions.to_csv(RESULTS_DIR / f"{key}_predictions.csv", index=False)
-        metrics.to_csv(RESULTS_DIR / f"{key}_metrics.csv", index=False)
-        print()
+    validate_retriever(
+        "TF-IDF",
+        tfidf,
+    )
 
-    summary = pd.concat(all_metrics, ignore_index=True)
-    summary.to_csv(RESULTS_DIR / "metrics_summary.csv", index=False)
+    tfidf_predictions = (
+        rank_model_one_by_one(
+            model_name="TF-IDF",
+            retriever=tfidf,
+            test_df=test_df,
+        )
+    )
 
-    print("=" * 78)
-    print("Results (official test set)")
-    print("=" * 78)
-    print(summary.to_string(index=False, float_format=lambda x: f"{x:.4f}"))
+    tfidf_metrics = evaluate_subsets(
+        model_name="TF-IDF",
+        predictions_df=tfidf_predictions,
+    )
+
+    save_results(
+        model_key="tfidf",
+        predictions_df=tfidf_predictions,
+        metrics_df=tfidf_metrics,
+    )
+
+    all_metrics.append(
+        tfidf_metrics
+    )
+
     print()
-    print(f"Saved to: {RESULTS_DIR}")
+
+    # ========================================================
+    # BM25
+    # ========================================================
+
+    bm25 = BM25Retriever()
+
+    validate_retriever(
+        "BM25",
+        bm25,
+    )
+
+    bm25_predictions = (
+        rank_model_one_by_one(
+            model_name="BM25",
+            retriever=bm25,
+            test_df=test_df,
+        )
+    )
+
+    bm25_metrics = evaluate_subsets(
+        model_name="BM25",
+        predictions_df=bm25_predictions,
+    )
+
+    save_results(
+        model_key="bm25",
+        predictions_df=bm25_predictions,
+        metrics_df=bm25_metrics,
+    )
+
+    all_metrics.append(
+        bm25_metrics
+    )
+
+    print()
+
+    # ========================================================
+    # MiniLM
+    # ========================================================
+
+    minilm = MiniLMRetriever()
+
+    validate_retriever(
+        "MiniLM",
+        minilm,
+    )
+
+    minilm_predictions = (
+        rank_minilm_batch(
+            retriever=minilm,
+            test_df=test_df,
+        )
+    )
+
+    minilm_metrics = evaluate_subsets(
+        model_name="MiniLM",
+        predictions_df=minilm_predictions,
+    )
+
+    save_results(
+        model_key="minilm",
+        predictions_df=minilm_predictions,
+        metrics_df=minilm_metrics,
+    )
+
+    all_metrics.append(
+        minilm_metrics
+    )
+
+    # ========================================================
+    # Combined comparison
+    # ========================================================
+
+    comparison_df = pd.concat(
+        all_metrics,
+        ignore_index=True,
+    )
+
+    comparison_file = (
+        RESULTS_DIR
+        / "model_comparison.csv"
+    )
+
+    comparison_df.to_csv(
+        comparison_file,
+        index=False,
+        encoding="utf-8",
+    )
+
+    print()
+    print("=" * 90)
+    print("MODEL COMPARISON")
+    print("=" * 90)
+
+    print(
+        comparison_df.to_string(
+            index=False
+        )
+    )
+
+    print()
+    print(
+        f"Saved comparison: "
+        f"{comparison_file}"
+    )
 
 
 if __name__ == "__main__":
